@@ -40,6 +40,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.TimeUnit
 
 @OptIn(UnstableApi::class)
 class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
@@ -47,11 +49,10 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var lastSongs = emptyList<Song>()
 
-    private val sessionFuture = java.util.concurrent.CompletableFuture<MediaLibraryService.MediaLibrarySession>()
-
     private var bound = false
     private var binder: PlayerService.Binder? = null
     private var session: MediaLibraryService.MediaLibrarySession? = null
+    private var sessionFuture = CompletableFuture<MediaLibraryService.MediaLibrarySession>()
 
     private val callValidator by lazy {
         CallValidator(applicationContext, R.xml.allowed_media_browser_callers)
@@ -77,7 +78,7 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
         if (!callValidator.canCall(controllerInfo.packageName, controllerInfo.uid)) return null
         ensureBound()
         return runCatching {
-            sessionFuture.get(2, java.util.concurrent.TimeUnit.SECONDS)
+            sessionFuture.get(2, TimeUnit.SECONDS)
         }.getOrNull()
     }
 
@@ -92,21 +93,23 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
             .setSessionActivity(activityPendingIntent<MainActivity>())
             .build()
 
-        sessionFuture.complete(session)  // <-- add this line
+        sessionFuture.complete(session)
     }
 
     override fun onServiceDisconnected(name: ComponentName) {
         bound = false
+        binding = false
         binder = null
         session?.release()
         session = null
-        sessionFuture = java.util.concurrent.CompletableFuture() // reset for next reconnect
+        sessionFuture = CompletableFuture()
     }
 
+    private var binding = false
     private fun ensureBound() {
-        if (bound) return
+        if (bound || binding) return
+        binding = true
         bindService(intent<PlayerService>(), this, Context.BIND_AUTO_CREATE)
-        bound = true // mark as in-flight to prevent duplicate binds
     }
 
     private fun browseItem(
@@ -386,7 +389,7 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
         ): ListenableFuture<List<MediaItem>> {
             val future = SettableFuture.create<List<MediaItem>>()
             serviceScope.launch {
-                try{
+                try {
                     val resolved = runCatching {
                         val item = mediaItems.firstOrNull() ?: return@runCatching mediaItems
                         val data = item.mediaId.split('/')
