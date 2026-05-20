@@ -45,7 +45,7 @@ because this repository is maintained with these principles in mind, issues that
 - Skip silence
 - Sleep timer
 - Audio normalization
-- Android Auto
+- Android Auto (may or maynot work)
 - Persistent queue
 - Open YouTube/YouTube Music links (`watch`, `playlist`, `channel`)
 - ...
