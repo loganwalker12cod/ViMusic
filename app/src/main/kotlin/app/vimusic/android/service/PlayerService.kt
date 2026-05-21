@@ -287,6 +287,7 @@ class PlayerService : InvincibleService(), Player.Listener, PlaybackStatsListene
         maybeRestorePlayerQueue()
 
         mediaSession = MediaSession.Builder(this, player)
+            .setId("vimusic_playback")
             .setSessionActivity(activityPendingIntent<MainActivity>())
             .build()
 
