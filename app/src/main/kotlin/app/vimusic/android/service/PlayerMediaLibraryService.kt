@@ -115,9 +115,16 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
         this.binder = binder
         bound = true
 
-        // Rebuild the session using the real PlayerService player, replacing the stub.
-        val oldSession = session
+        // Release the stub session synchronously BEFORE building the real one.
+        // MediaLibrarySession IDs must be globally unique -- if the stub session is still
+        // alive when we call build(), Media3 throws "Session ID must be unique" and crashes.
+        // The stub wraps an empty ExoPlayer with no system registration, so release() is instant.
         val oldStub = stubPlayer
+        session?.release()
+        session = null
+        stubPlayer = null
+        oldStub?.release()
+
         session = MediaLibraryService.MediaLibrarySession.Builder(
             this,
             binder.player,
@@ -125,20 +132,17 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
         )
             .setSessionActivity(activityPendingIntent<MainActivity>())
             .build()
-        stubPlayer = null
-
-        // Release the stub session and player off the main thread.
-        CoroutineScope(Dispatchers.IO).launch {
-            oldSession?.release()
-            oldStub?.release()
-        }
     }
 
     override fun onServiceDisconnected(name: ComponentName) {
         bound = false
         binder = null
-        // Rebuild with a stub so the session stays valid for Auto.
-        val oldSession = session
+
+        // Release the real session synchronously before building the stub replacement,
+        // for the same reason as onServiceConnected -- session IDs must be unique.
+        session?.release()
+        session = null
+
         stubPlayer = ExoPlayer.Builder(this).build()
         session = MediaLibraryService.MediaLibrarySession.Builder(
             this,
@@ -147,9 +151,6 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
         )
             .setSessionActivity(activityPendingIntent<MainActivity>())
             .build()
-        CoroutineScope(Dispatchers.IO).launch {
-            oldSession?.release()
-        }
     }
 
     private var binding = false
