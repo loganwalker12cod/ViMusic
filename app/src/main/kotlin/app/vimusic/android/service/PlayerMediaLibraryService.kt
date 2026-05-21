@@ -70,6 +70,7 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
             stubPlayer!!,
             SessionCallback(null)
         )
+            .setId("vimusic_library_stub")
             .setSessionActivity(activityPendingIntent<MainActivity>())
             .build()
 
@@ -130,6 +131,7 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
             binder.player,
             SessionCallback(binder)
         )
+            .setId("vimusic_library")
             .setSessionActivity(activityPendingIntent<MainActivity>())
             .build()
     }
@@ -149,6 +151,7 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
             stubPlayer!!,
             SessionCallback(null)
         )
+            .setId("vimusic_library_stub")
             .setSessionActivity(activityPendingIntent<MainActivity>())
             .build()
     }
