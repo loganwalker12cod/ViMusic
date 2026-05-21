@@ -13,6 +13,7 @@ import androidx.core.os.bundleOf
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.LibraryResult
 import androidx.media3.session.MediaLibraryService
 import androidx.media3.session.MediaSession
@@ -40,8 +41,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.util.concurrent.CompletableFuture
-import java.util.concurrent.TimeUnit
 
 @OptIn(UnstableApi::class)
 class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
@@ -52,7 +51,9 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
     private var bound = false
     private var binder: PlayerService.Binder? = null
     private var session: MediaLibraryService.MediaLibrarySession? = null
-    private var sessionFuture = CompletableFuture<MediaLibraryService.MediaLibrarySession>()
+    // A minimal player used only to satisfy MediaLibrarySession until PlayerService connects.
+    // Replaced with PlayerService's real ExoPlayer in onServiceConnected.
+    private var stubPlayer: ExoPlayer? = null
 
     private val callValidator by lazy {
         CallValidator(applicationContext, R.xml.allowed_media_browser_callers)
@@ -60,24 +61,37 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
 
     override fun onCreate() {
         super.onCreate()
+        // Build the session immediately using a stub player so onGetSession can return
+        // a non-null session without any blocking wait. Blocking onGetSession causes ANRs
+        // which Android Auto reports as "this app has a bug".
+        stubPlayer = ExoPlayer.Builder(this).build()
+        session = MediaLibraryService.MediaLibrarySession.Builder(
+            this,
+            stubPlayer!!,
+            SessionCallback(null)
+        )
+            .setSessionActivity(activityPendingIntent<MainActivity>())
+            .build()
+
         // Start this service explicitly so Android does not destroy it when Auto unbinds.
-        // Without this, Auto unbinding causes immediate destruction, which Auto detects
-        // and instantly rebinds -- creating a tight create/destroy loop at ~28 cycles/second
-        // that causes ANRs and the "this app has a bug" notification.
+        // Without startService, Auto unbinding immediately destroys the service, Auto detects
+        // this and rebinds instantly -- creating a tight create/destroy loop (~28 cycles/sec)
+        // that also triggers the "this app has a bug" ANR notification.
         startService(intent<PlayerMediaLibraryService>())
         startService(intent<PlayerService>())
         bindService(intent<PlayerService>(), this, Context.BIND_AUTO_CREATE)
     }
 
     override fun onDestroy() {
-        // Release the session off the main thread to avoid a Binder.transact deadlock
-        // which causes an ANR and the "this app has a bug" notification from Android Auto.
+        // Release off the main thread -- session.release() does a synchronous Binder.transact
+        // to the system MediaSession. If that blocks, it causes an ANR on the main thread.
         val sessionToRelease = session
+        val stubToRelease = stubPlayer
         session = null
-        // Use a fresh independent scope -- serviceScope is cancelled right below,
-        // which would kill any coroutine launched on it before it runs.
+        stubPlayer = null
         CoroutineScope(Dispatchers.IO).launch {
             sessionToRelease?.release()
+            stubToRelease?.release()
         }
         if (bound) {
             bound = false
@@ -87,14 +101,13 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
         super.onDestroy()
     }
 
+    // onGetSession is called on the main thread by the Binder framework.
+    // It MUST return immediately -- any blocking here causes an ANR.
     override fun onGetSession(
         controllerInfo: MediaSession.ControllerInfo
     ): MediaLibraryService.MediaLibrarySession? {
         if (!callValidator.canCall(controllerInfo.packageName, controllerInfo.uid)) return null
-        ensureBound()
-        return runCatching {
-            sessionFuture.get(2, TimeUnit.SECONDS)
-        }.getOrNull()
+        return session
     }
 
     override fun onServiceConnected(className: ComponentName, service: IBinder) {
@@ -102,24 +115,40 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
         this.binder = binder
         bound = true
 
-        if (session != null) return
-
-        session = MediaLibraryService.MediaLibrarySession.Builder(this, binder.player, SessionCallback(binder))
+        // Rebuild the session using the real PlayerService player, replacing the stub.
+        val oldSession = session
+        val oldStub = stubPlayer
+        session = MediaLibraryService.MediaLibrarySession.Builder(
+            this,
+            binder.player,
+            SessionCallback(binder)
+        )
             .setSessionActivity(activityPendingIntent<MainActivity>())
             .build()
+        stubPlayer = null
 
-        sessionFuture.complete(session)
+        // Release the stub session and player off the main thread.
+        CoroutineScope(Dispatchers.IO).launch {
+            oldSession?.release()
+            oldStub?.release()
+        }
     }
 
     override fun onServiceDisconnected(name: ComponentName) {
         bound = false
-        binding = false
         binder = null
-        val sessionToRelease = session
-        session = null
-        sessionFuture = CompletableFuture()
+        // Rebuild with a stub so the session stays valid for Auto.
+        val oldSession = session
+        stubPlayer = ExoPlayer.Builder(this).build()
+        session = MediaLibraryService.MediaLibrarySession.Builder(
+            this,
+            stubPlayer!!,
+            SessionCallback(null)
+        )
+            .setSessionActivity(activityPendingIntent<MainActivity>())
+            .build()
         CoroutineScope(Dispatchers.IO).launch {
-            sessionToRelease?.release()
+            oldSession?.release()
         }
     }
 
@@ -275,7 +304,7 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
         )
 
     private inner class SessionCallback(
-        private val binder: PlayerService.Binder
+        private val binder: PlayerService.Binder?
     ) : MediaLibraryService.MediaLibrarySession.Callback {
         @Suppress("CyclomaticComplexMethod")
         override fun onGetChildren(
@@ -385,7 +414,7 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
             query: String,
             params: MediaLibraryService.LibraryParams?
         ): ListenableFuture<LibraryResult<Void>> {
-            if (query.isNotBlank()) binder.playFromSearch(query)
+            if (query.isNotBlank()) binder?.playFromSearch(query)
             return Futures.immediateFuture(LibraryResult.ofVoid())
         }
 
@@ -425,7 +454,7 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
                                 mediaLibraryRepository.getFavoritesShuffled()
 
                             MediaId.OFFLINE ->
-                                mediaLibraryRepository.getOfflineCachedShuffled { binder.isCached(it) }
+                                mediaLibraryRepository.getOfflineCachedShuffled { binder?.isCached(it) == true }
 
                             MediaId.TOP -> {
                                 val duration = DataPreferences.topListPeriod.duration
@@ -464,7 +493,7 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
                         (mediaList?.map(Song::asMediaItem) ?: emptyList()).also {
                             if (it.isNotEmpty()) {
                                 withContext(Dispatchers.Main) {
-                                    binder.player.forcePlayAtIndex(
+                                    binder?.player?.forcePlayAtIndex(
                                         items = it,
                                         index = index.coerceIn(0, it.size)
                                     )
