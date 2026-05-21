@@ -13,7 +13,6 @@ import androidx.core.os.bundleOf
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.LibraryResult
 import androidx.media3.session.MediaLibraryService
 import androidx.media3.session.MediaSession
@@ -51,9 +50,6 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
     private var bound = false
     private var binder: PlayerService.Binder? = null
     private var session: MediaLibraryService.MediaLibrarySession? = null
-    // A minimal player used only to satisfy MediaLibrarySession until PlayerService connects.
-    // Replaced with PlayerService's real ExoPlayer in onServiceConnected.
-    private var stubPlayer: ExoPlayer? = null
 
     private val callValidator by lazy {
         CallValidator(applicationContext, R.xml.allowed_media_browser_callers)
@@ -61,23 +57,10 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
 
     override fun onCreate() {
         super.onCreate()
-        // Build the session immediately using a stub player so onGetSession can return
-        // a non-null session without any blocking wait. Blocking onGetSession causes ANRs
-        // which Android Auto reports as "this app has a bug".
-        stubPlayer = ExoPlayer.Builder(this).build()
-        session = MediaLibraryService.MediaLibrarySession.Builder(
-            this,
-            stubPlayer!!,
-            SessionCallback(null)
-        )
-            .setId("vimusic_library_stub")
-            .setSessionActivity(activityPendingIntent<MainActivity>())
-            .build()
-
         // Start this service explicitly so Android does not destroy it when Auto unbinds.
-        // Without startService, Auto unbinding immediately destroys the service, Auto detects
-        // this and rebinds instantly -- creating a tight create/destroy loop (~28 cycles/sec)
-        // that also triggers the "this app has a bug" ANR notification.
+        // Without startService, Auto unbinding immediately destroys the service which Auto
+        // detects and instantly rebinds -- creating a tight create/destroy loop at ~28
+        // cycles/second that triggers the "this app has a bug" ANR notification.
         startService(intent<PlayerMediaLibraryService>())
         startService(intent<PlayerService>())
         bindService(intent<PlayerService>(), this, Context.BIND_AUTO_CREATE)
@@ -85,14 +68,11 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
 
     override fun onDestroy() {
         // Release off the main thread -- session.release() does a synchronous Binder.transact
-        // to the system MediaSession. If that blocks, it causes an ANR on the main thread.
+        // to the system MediaSession which can block and cause an ANR on the main thread.
         val sessionToRelease = session
-        val stubToRelease = stubPlayer
         session = null
-        stubPlayer = null
         CoroutineScope(Dispatchers.IO).launch {
             sessionToRelease?.release()
-            stubToRelease?.release()
         }
         if (bound) {
             bound = false
@@ -102,15 +82,14 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
         super.onDestroy()
     }
 
-    // onGetSession is called on the main thread by the Binder framework.
-    // It MUST return immediately -- any blocking here causes an ANR.
+    // onGetSession is called on the main thread -- must return immediately, no blocking.
+    // Returns null until PlayerService has bound and the real session is ready.
+    // Returning null for the legacy uid=-1 probe is safe -- Media3 retries automatically.
+    // Returning null for real callers before the session is ready makes them retry too,
+    // which is correct: they will reconnect once the session exists.
     override fun onGetSession(
         controllerInfo: MediaSession.ControllerInfo
     ): MediaLibraryService.MediaLibrarySession? {
-        // uid == -1 is Media3's internal legacy controller created when Android Auto connects
-        // via the legacy MediaBrowserService path. It has no package name and uid=-1 so
-        // canCall() would reject it -- but it must be allowed through or Auto gets
-        // onConnectionFailed and shows an infinite loading spinner.
         if (controllerInfo.uid != -1 &&
             !callValidator.canCall(controllerInfo.packageName, controllerInfo.uid)) return null
         return session
@@ -121,44 +100,27 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
         this.binder = binder
         bound = true
 
-        // Release the stub session synchronously BEFORE building the real one.
-        // MediaLibrarySession IDs must be globally unique -- if the stub session is still
-        // alive when we call build(), Media3 throws "Session ID must be unique" and crashes.
-        // The stub wraps an empty ExoPlayer with no system registration, so release() is instant.
-        val oldStub = stubPlayer
-        session?.release()
-        session = null
-        stubPlayer = null
-        oldStub?.release()
-
-        session = MediaLibraryService.MediaLibrarySession.Builder(
-            this,
-            binder.player,
-            SessionCallback(binder)
-        )
-            .setId("vimusic_library")
-            .setSessionActivity(activityPendingIntent<MainActivity>())
-            .build()
+        // Build the one and only session now that the real player is available.
+        // We never swap or rebuild this session -- doing so fires onSessionDestroyed
+        // at Android Auto, which causes it to reconnect loop indefinitely.
+        if (session == null) {
+            session = MediaLibraryService.MediaLibrarySession.Builder(
+                this,
+                binder.player,
+                SessionCallback(binder)
+            )
+                .setId("vimusic_library")
+                .setSessionActivity(activityPendingIntent<MainActivity>())
+                .build()
+        }
     }
 
     override fun onServiceDisconnected(name: ComponentName) {
         bound = false
         binder = null
-
-        // Release the real session synchronously before building the stub replacement,
-        // for the same reason as onServiceConnected -- session IDs must be unique.
-        session?.release()
-        session = null
-
-        stubPlayer = ExoPlayer.Builder(this).build()
-        session = MediaLibraryService.MediaLibrarySession.Builder(
-            this,
-            stubPlayer!!,
-            SessionCallback(null)
-        )
-            .setId("vimusic_library_stub")
-            .setSessionActivity(activityPendingIntent<MainActivity>())
-            .build()
+        // Do not release or rebuild the session here -- that would fire onSessionDestroyed
+        // at Auto and break the connection. The session stays alive with its player reference;
+        // PlayerService will restart and rebind shortly via the started-service mechanism.
     }
 
     private var binding = false
