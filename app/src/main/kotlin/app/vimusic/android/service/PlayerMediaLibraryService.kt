@@ -107,7 +107,12 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
     override fun onGetSession(
         controllerInfo: MediaSession.ControllerInfo
     ): MediaLibraryService.MediaLibrarySession? {
-        if (!callValidator.canCall(controllerInfo.packageName, controllerInfo.uid)) return null
+        // uid == -1 is Media3's internal legacy controller created when Android Auto connects
+        // via the legacy MediaBrowserService path. It has no package name and uid=-1 so
+        // canCall() would reject it -- but it must be allowed through or Auto gets
+        // onConnectionFailed and shows an infinite loading spinner.
+        if (controllerInfo.uid != -1 &&
+            !callValidator.canCall(controllerInfo.packageName, controllerInfo.uid)) return null
         return session
     }
 
