@@ -60,14 +60,29 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
 
     override fun onCreate() {
         super.onCreate()
+        // Start this service explicitly so Android does not destroy it when Auto unbinds.
+        // Without this, Auto unbinding causes immediate destruction, which Auto detects
+        // and instantly rebinds -- creating a tight create/destroy loop at ~28 cycles/second
+        // that causes ANRs and the "this app has a bug" notification.
+        startService(intent<PlayerMediaLibraryService>())
         startService(intent<PlayerService>())
         bindService(intent<PlayerService>(), this, Context.BIND_AUTO_CREATE)
     }
 
     override fun onDestroy() {
-        session?.release()
+        // Release the session off the main thread to avoid a Binder.transact deadlock
+        // which causes an ANR and the "this app has a bug" notification from Android Auto.
+        val sessionToRelease = session
         session = null
-        if (bound) unbindService(this)
+        // Use a fresh independent scope -- serviceScope is cancelled right below,
+        // which would kill any coroutine launched on it before it runs.
+        CoroutineScope(Dispatchers.IO).launch {
+            sessionToRelease?.release()
+        }
+        if (bound) {
+            bound = false
+            unbindService(this)
+        }
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -100,9 +115,12 @@ class PlayerMediaLibraryService : MediaLibraryService(), ServiceConnection {
         bound = false
         binding = false
         binder = null
-        session?.release()
+        val sessionToRelease = session
         session = null
         sessionFuture = CompletableFuture()
+        CoroutineScope(Dispatchers.IO).launch {
+            sessionToRelease?.release()
+        }
     }
 
     private var binding = false
