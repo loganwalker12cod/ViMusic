@@ -14,7 +14,8 @@ import java.security.MessageDigest
  */
 class CallValidator(
     context: Context,
-    @XmlRes callerList: Int
+    @XmlRes callerList: Int,
+    private val isDebug: Boolean = false
 ) {
     private val packageManager = context.packageManager
 
@@ -26,6 +27,7 @@ class CallValidator(
     private val cache = mutableMapOf<Pair<String, Int>, Boolean>()
 
     fun canCall(pak: String, uid: Int) = cache.getOrPut(pak to uid) cache@{
+        if (isDebug) return@cache true
         val info = getPackageInfo(pak) ?: return@cache false
         if (info.applicationInfo?.uid != uid) return@cache false
         val signature = info.signature ?: return@cache false
